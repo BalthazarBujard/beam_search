@@ -3,26 +3,33 @@ import torch
 import numpy as np
 import copy
 
-#TODO : CHANGE FROM SCORE TO SCORES AS LIST[FLOAT] AND COMPUTE SCORE WITH THAT LIST AND THE ACTUAL LENGTH OF THE CANDIDATE
 class Candidate():
-    def __init__(self,states:List[Any], probs:List[float]):
+    def __init__(self,states:List[Any], probs:List[float], terminal_state : Optional[int] = None):
         self.states = states #(T,)
         self.probs = probs #(T,)
+        self.terminal_state = terminal_state
+        self.effective_length = len(self.states) #length of sequence until terminal state is found
+        self.terminated = False #True if terminal state is assigned to candidate sequence
         
     def update(self,state:Any,prob:float):
+        #update states and probs
         self.states+=[state]
         self.probs+=[prob]
+        
+        #update/check effective length and terminated state
+        if not self.terminated :
+            self.effective_length = len(self.states)
+            if state == self.terminal_state:
+                self.terminated = True
     
-    def compute_prob(self):
-        return np.prod(self.probs) #log(prod(p(yt|y<t)))
+    def compute_prob(self) -> float:
+        return np.prod(self.probs) #prod(p(yt|y<t))
     
-    #TODO : PRENDRE EN COMPTE TAILLE EFFECTIVE DE SEQUENCE PREDITE
-    def compute_score(self):
-        return sum(np.log(self.probs))
+    def compute_score(self) -> float:
+        return sum(np.log(self.probs[:self.effective_length]))/(self.effective_length**0.75)
     
     @property
     def score(self):
-        #raise NotImplementedError()
         return self.compute_score()
     
     def __str__(self):
@@ -30,10 +37,11 @@ class Candidate():
     
     
 class BeamSearch():
-    def __init__(self, transition_fn : Callable, transition_fn_args : Optional[Dict]):
+    def __init__(self, transition_fn : Callable, transition_fn_args : Optional[Dict], terminal_state : Optional[int] = None):
         
         self.transition_fn = transition_fn #function to compute probabilities over
         self.transition_fn_args = transition_fn_args #additional arguments for transition function
+        self.terminal_state = terminal_state #equivalent of End Of Sentence token
     
     def __call__(self, x_init : torch.Tensor, beam_width : int, max_len : int) -> List[Candidate]:
         
@@ -41,29 +49,33 @@ class BeamSearch():
         
         #init
         #list of (state,score) where state is the sequence of idx and score the total conditional probability = prod p(y_t|y<t)
-        candidates =[[Candidate([x_init[b].item()], [1]) for _ in range(beam_width)] for b in range(B)] #(B,beam_width)
+        candidates =[[Candidate([x_init[b].item()], [1], self.terminal_state) for _ in range(beam_width)] for b in range(B)] #(B,beam_width)
         
         for _ in range(max_len):
             candidates = self.__search_one_step(candidates)
 
+        #TODO : AJOUTER CALCUL DE EFFECTIVE LENGTH AVEC TERMINAL STATE
         best_candidates = [sorted(candidates_group,key=lambda x : x.score, reverse=True)[0] for candidates_group in candidates] #(B,)
         
         return best_candidates
     
-    def __search_one_step(self, candidates: List[List[Candidate]]):
+    def __search_one_step(self, candidates : List[List[Candidate]]):
         
         beam_width = len(candidates[0])
         
         probs = self.transition_fn(candidates,**self.transition_fn_args) #(B,beam_width,state space size)
         
-        # ATTENTION : 
-        # WE WANT TO MAXIMIZE THE prod(P(Y_t|Y<t)) so before doing find_k_best we need to multiply the prob by the score of the candidate
         for batch_index, beam_probs in enumerate(probs) :
             #print("-*-*-*-")
             #beam_probs (beam_width, state space size)
             this_candidates = candidates[batch_index]
             
+            # WE WANT TO MAXIMIZE THE prod(P(Y_t|Y<t)) so before doing find_k_best we need to multiply the prob by the score of the candidate
             #get probabilities (prob of prod(P(y_t-1|y<t-1)))
+            
+            # TODO : TERMINATED CANDIDATES CAN BE KEPT IF THEIR SCORE IS GREATER THAN OTHER CANDIDATES OTPIONS 
+            # BUT WE NEED TO COMPARE THE NEW BEAM_STATES_LIKELIHOOD (OF NON-TERMINATED SEQUENCES) WITH THE TERMINATED ONES
+            
             candidates_probs = torch.tensor([c.compute_prob() for c in this_candidates], device=beam_probs.device).view(-1,1) #(beam_width,1)
             #update beam_probs
             beam_states_likelihood = beam_probs*candidates_probs 

@@ -23,7 +23,7 @@ class Candidate():
                 self.terminated = True
     
     def compute_prob(self) -> float:
-        return np.prod(self.probs) #prod(p(yt|y<t))
+        return np.prod(self.probs[:self.effective_length]) #prod(p(yt|y<t)) until y_t == terminal state
     
     def compute_score(self) -> float:
         return sum(np.log(self.probs[:self.effective_length]))/(self.effective_length**0.75)
@@ -54,7 +54,6 @@ class BeamSearch():
         for _ in range(max_len):
             candidates = self.__search_one_step(candidates)
 
-        #TODO : AJOUTER CALCUL DE EFFECTIVE LENGTH AVEC TERMINAL STATE
         best_candidates = [sorted(candidates_group,key=lambda x : x.score, reverse=True)[0] for candidates_group in candidates] #(B,)
         
         return best_candidates

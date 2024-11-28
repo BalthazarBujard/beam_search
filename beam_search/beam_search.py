@@ -77,9 +77,9 @@ class BeamSearch():
             
             candidates_probs = torch.tensor([c.compute_prob() for c in this_candidates], device=beam_probs.device).view(-1,1) #(beam_width,1)
             #update beam_probs
-            beam_states_likelihood = beam_probs*candidates_probs 
+            beam_states_log_likelihood = torch.log(beam_probs*candidates_probs)
             
-            topk_states= self.__find_k_best_states(beam_states_likelihood, beam_width) #(beam_width, 2)
+            topk_states= self.__find_k_best_states(beam_states_log_likelihood, beam_width) #(beam_width, 2)
             
             # retrieve state probability from beam_probs
             topk_probs = beam_probs[topk_states[:,0],topk_states[:,1]].numpy(force=True)

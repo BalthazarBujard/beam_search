@@ -43,7 +43,10 @@ class BeamSearch():
         self.transition_fn_args = transition_fn_args #additional arguments for transition function
         self.terminal_state = terminal_state #equivalent of End Of Sentence token
     
-    def __call__(self, x_init : torch.Tensor, beam_width : int, max_len : int) -> List[Candidate]:
+    #returns the nbest sequences amongst beam_width best candidates for each element in the batch
+    def __call__(self, x_init : torch.Tensor, beam_width : int, max_len : int, nbest : int = 1) -> List[List[Candidate]]:
+        
+        assert nbest<=beam_width
         
         B, L0 = x_init.shape #x_init can have an initial state greater than 1 (?)
         
@@ -51,10 +54,11 @@ class BeamSearch():
         #list of (state,score) where state is the sequence of idx and score the total conditional probability = prod p(y_t|y<t)
         candidates =[[Candidate([x_init[b].item()], [1], self.terminal_state) for _ in range(beam_width)] for b in range(B)] #(B,beam_width)
         
-        for _ in range(max_len):
+        for _ in range(max_len-1): #-1 because starting state is already included
+            #print("-*-*-*-new search step-*-*-*-")
             candidates = self.__search_one_step(candidates)
 
-        best_candidates = [sorted(candidates_group,key=lambda x : x.score, reverse=True)[0] for candidates_group in candidates] #(B,)
+        best_candidates = [sorted(candidates_group,key=lambda x : x.score, reverse=True)[:nbest] for candidates_group in candidates] #(B,)
         
         return best_candidates
     
@@ -65,9 +69,17 @@ class BeamSearch():
         probs = self.transition_fn(candidates,**self.transition_fn_args) #(B,beam_width,state space size)
         
         for batch_index, beam_probs in enumerate(probs) :
-            #print("-*-*-*-")
+            #print("----new batch element--------")
+            
             #beam_probs (beam_width, state space size)
             this_candidates = candidates[batch_index]
+            
+            #if first step all candidates share the same state (i.e. start state) -> dont use  all candidates
+            if this_candidates[0].effective_length==1:
+                beam_probs = beam_probs[0].unsqueeze(0) #(1, state_space)
+                this_candidates=[this_candidates[0]] #(1,)
+                
+            candidates_probs = torch.tensor([c.compute_prob() for c in this_candidates], device=beam_probs.device).view(-1,1) #(beam_width,1)
             
             # WE WANT TO MAXIMIZE THE prod(P(Y_t|Y<t)) so before doing find_k_best we need to multiply the prob by the score of the candidate
             #get probabilities (prob of prod(P(y_t-1|y<t-1)))
@@ -75,14 +87,16 @@ class BeamSearch():
             # TODO : TERMINATED CANDIDATES CAN BE KEPT IF THEIR SCORE IS GREATER THAN OTHER CANDIDATES OTPIONS 
             # BUT WE NEED TO COMPARE THE NEW BEAM_STATES_LIKELIHOOD (OF NON-TERMINATED SEQUENCES) WITH THE TERMINATED ONES
             
-            candidates_probs = torch.tensor([c.compute_prob() for c in this_candidates], device=beam_probs.device).view(-1,1) #(beam_width,1)
             #update beam_probs
-            beam_states_log_likelihood = torch.log(beam_probs*candidates_probs)
+            beam_states_log_likelihood = torch.log(beam_probs*candidates_probs) #(beam_width, state space)
+            #print(beam_states_log_likelihood.shape)
             
             topk_states= self.__find_k_best_states(beam_states_log_likelihood, beam_width) #(beam_width, 2)
+            #print(topk_states)
             
             # retrieve state probability from beam_probs
             topk_probs = beam_probs[topk_states[:,0],topk_states[:,1]].numpy(force=True)
+            #print(topk_probs)
             
             
             #update candidates with new states
@@ -99,21 +113,7 @@ class BeamSearch():
         candidates_to_update : List[Candidate] = [copy.deepcopy(candidates[idx]) for idx in topk_states[:,0]] #retrieve best candidates to continue
             
         for k,(new_state,prob) in enumerate(zip(topk_states[:,1],topk_probs)):
-            #print("candidate index:",k)
-             
-            #candidate_to_continue = candidates[index[0]]
-            #print(f"prev candidate:\n{prev_candidate}")
-            #new_state = index[1] 
-            
             candidates_to_update[k].update(new_state, prob)
-            
-            # state_score = np.log(prob)
-            
-            # new_states = candidate_to_continue.states + [new_state]
-            # #new_states_vectors = torch.cat([prev_candidate.states_vectors, token_vector.view(1,1,-1)],dim=1)
-            # new_score = candidate_to_continue.score + state_score
-            
-            # updated_candidates[k]=Candidate(new_states, new_score)
         
         return candidates_to_update
     

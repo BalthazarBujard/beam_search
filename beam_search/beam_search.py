@@ -2,15 +2,18 @@ from typing import Any, List, Callable, Dict, Tuple, Optional
 import torch
 import numpy as np
 import copy
+from scipy.stats import entropy
 
+
+#TODO : GIVE POSSIBILITY TO USER TO GIVE SCORING FUNCTION AS PARAM
 class Candidate():
     def __init__(self,states:List[Any], probs:List[float], terminal_state : Optional[int] = None):
         self.states = states #(T,)
         self.probs = probs #(T,)
         self.terminal_state = terminal_state
-        self.effective_length = len(self.states) #length of sequence until terminal state is found
-        self.terminated = False #True if terminal state is assigned to candidate sequence
-        
+        self.terminated = np.isin(states,terminal_state).any() #True if terminal state is assigned to candidate sequence
+        self.effective_length = len(self.states) if not self.terminated else np.where(np.array(states)==terminal_state)[0][0]+1 #length of sequence until terminal state is found
+    
     def update(self,state:Any,prob:float):
         #update states and probs
         self.states+=[state]
@@ -21,12 +24,16 @@ class Candidate():
             self.effective_length = len(self.states)
             if state == self.terminal_state:
                 self.terminated = True
+        
     
     def compute_prob(self) -> float:
         return np.prod(self.probs[:self.effective_length]) #prod(p(yt|y<t)) until y_t == terminal state
     
     def compute_score(self) -> float:
-        return sum(np.log(self.probs[:self.effective_length]))/(self.effective_length**0.75)
+        probs = self.probs[:self.effective_length]
+        # states_count = np.bincount(self.states)
+        # H = entropy(states_count/sum(states_count))
+        return sum(np.log(probs))/(self.effective_length**0.75) #+ 0.5*self.effective_length + 10*H
     
     @property
     def score(self):
@@ -55,7 +62,7 @@ class BeamSearch():
         candidates =[[Candidate([x_init[b].item()], [1], self.terminal_state) for _ in range(beam_width)] for b in range(B)] #(B,beam_width)
         
         for _ in range(max_len-1): #-1 because starting state is already included
-            #print("-*-*-*-new search step-*-*-*-")
+            # print("-*-*-*-new search step-*-*-*-")
             candidates = self.__search_one_step(candidates)
 
         best_candidates = [sorted(candidates_group,key=lambda x : x.score, reverse=True)[:nbest] for candidates_group in candidates] #(B,)
@@ -68,42 +75,74 @@ class BeamSearch():
         
         probs = self.transition_fn(candidates,**self.transition_fn_args) #(B,beam_width,state space size)
         
-        for batch_index, beam_probs in enumerate(probs) :
-            #print("----new batch element--------")
+        
             
-            #beam_probs (beam_width, state space size)
+        # WE WANT TO MAXIMIZE THE prod(P(Y_t|Y<t)) so before doing find_k_best we need to multiply the prob by the score of the candidate
+        #get probabilities (prob of prod(P(y_t-1|y<t-1)))
+        
+        # TODO : TERMINATED CANDIDATES CAN BE KEPT IF THEIR SCORE IS GREATER THAN OTHER CANDIDATES OTPIONS 
+        # BUT WE NEED TO COMPARE THE NEW BEAM_STATES_LIKELIHOOD (OF NON-TERMINATED SEQUENCES) WITH THE TERMINATED ONES
+        for batch_index, beams_probs in enumerate(probs) :
+            # print("----new batch element--------")
+            
+            #beams_probs (beam_width, state space size)
             this_candidates = candidates[batch_index]
             
             #if first step all candidates share the same state (i.e. start state) -> dont use  all candidates
             if this_candidates[0].effective_length==1:
-                beam_probs = beam_probs[0].unsqueeze(0) #(1, state_space)
+                beams_probs = beams_probs[0].unsqueeze(0) #(1, state_space)
                 this_candidates=[this_candidates[0]] #(1,)
+            
+            """ 
+            THIS METHOD IS APPARENTLY SLOWER THAN COMPUTING THE BEAM_STATES_LIKELIHOODS BUT ITS EASIER TO MODIFY SCORING FUNCTION
+            """
+            
+            #construct new candidate sequences for every new token possibility
+            new_candidates : List[List[Candidate]] = [
+                [Candidate(c.states+[new_state],c.probs+[new_prob.item()],self.terminal_state) for new_state, new_prob in enumerate(beams_probs[idx])] 
+                for idx,c in enumerate(this_candidates)
+                ] #(beam_width, state_space)
+            
+            
+            scores = torch.tensor([[c.score for c in beam_candidates] for beam_candidates in new_candidates])
+            
+            best_candidates_idx = self.__find_k_best(scores, beam_width)
+            
+            best_candidates = [new_candidates[idx[0]][idx[1]] for idx in best_candidates_idx]
+            
+            candidates[batch_index] = best_candidates
+            
+            """ 
+            END
+            """
+               
+            """ 
+            OTHER METHOD COMPUTING LIKELIHOOD WITHOUT CREATING NEW SET OF CANDIDATES
+            """
+            # candidates_probs = torch.tensor([c.compute_prob() for c in this_candidates], device=beam_probs.device).view(-1,1) #(beam_width,1)
+            
+            # # scores = torch.log(beam_probs*candidates_probs) #(beam_width, state space)
+            # topk_states = self.__find_k_best(scores, beam_width) #(beam_width, 2)
+            # # print(topk_states)
+            
+            # # retrieve state probability from beam_probs
+            # topk_probs = beam_probs[topk_states[:,0],topk_states[:,1]].numpy(force=True)
+            # #print(topk_probs)
+            
+            
+            # #update candidates with new states
+            # updated_candidates = self.__update_candidates(this_candidates, topk_states, topk_probs)
+            # #assign updated candidates
+            # candidates[batch_index] = updated_candidates
+            """ 
+            END
+            """
+            
+            
+            # for c in updated_candidates:
+            #     print(c)
+            
                 
-            candidates_probs = torch.tensor([c.compute_prob() for c in this_candidates], device=beam_probs.device).view(-1,1) #(beam_width,1)
-            
-            # WE WANT TO MAXIMIZE THE prod(P(Y_t|Y<t)) so before doing find_k_best we need to multiply the prob by the score of the candidate
-            #get probabilities (prob of prod(P(y_t-1|y<t-1)))
-            
-            # TODO : TERMINATED CANDIDATES CAN BE KEPT IF THEIR SCORE IS GREATER THAN OTHER CANDIDATES OTPIONS 
-            # BUT WE NEED TO COMPARE THE NEW BEAM_STATES_LIKELIHOOD (OF NON-TERMINATED SEQUENCES) WITH THE TERMINATED ONES
-            
-            #update beam_probs
-            beam_states_log_likelihood = torch.log(beam_probs*candidates_probs) #(beam_width, state space)
-            #print(beam_states_log_likelihood.shape)
-            
-            topk_states= self.__find_k_best_states(beam_states_log_likelihood, beam_width) #(beam_width, 2)
-            #print(topk_states)
-            
-            # retrieve state probability from beam_probs
-            topk_probs = beam_probs[topk_states[:,0],topk_states[:,1]].numpy(force=True)
-            #print(topk_probs)
-            
-            
-            #update candidates with new states
-            updated_candidates = self.__update_candidates(this_candidates, topk_states, topk_probs)
-            
-            #assign updated candidates
-            candidates[batch_index] =  updated_candidates    
         
         return candidates
     
@@ -117,7 +156,7 @@ class BeamSearch():
         
         return candidates_to_update
     
-    def __find_k_best_states(self, probs : torch.Tensor, beam_width : int) -> np.ndarray:
+    def __find_k_best(self, probs : torch.Tensor, beam_width : int) -> np.ndarray:
         #probs : (beam_width, state space size)
         
         topk_states_flat = torch.topk(probs.flatten(),beam_width)[1]

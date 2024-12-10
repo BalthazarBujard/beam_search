@@ -6,18 +6,37 @@ from scipy.stats import entropy
 
 
 #TODO : GIVE POSSIBILITY TO USER TO GIVE SCORING FUNCTION AS PARAM
+# the definition of the custom score function by the user has to take as argument a Candidate and use its attributes to compute the score
+# TODO : MAKE ATTRIBUTES PRIVATE IN ORDER TO NOT MODIFY THEM BY MISTAKE WITH CUSTOM SCORE
 class Candidate():
-    def __init__(self,states:List[Any], probs:List[float], terminal_state : Optional[int] = None):
-        self.states = states #(T,)
-        self.probs = probs #(T,)
+    def __init__(self,states:List[Any], probs:List[float], terminal_state : Optional[int] = None, score_fn : Optional[Callable] = None):
+        self.__states = states #(T,)
+        self.__probs = probs #(T,)
         self.terminal_state = terminal_state
         self.terminated = np.isin(states,terminal_state).any() #True if terminal state is assigned to candidate sequence
         self.effective_length = len(self.states) if not self.terminated else np.where(np.array(states)==terminal_state)[0][0]+1 #length of sequence until terminal state is found
+        self.score_fn = score_fn
+    
+    @property
+    def states(self):
+        return self.__states 
+    
+    @states.setter
+    def states(self, new_states : List[Any]):
+        self.__states = new_states
+    
+    @property
+    def probs(self):
+        return self.__probs 
+    
+    @probs.setter
+    def probs(self,new_probs : List[float]):
+        self.__probs = new_probs
     
     def update(self,state:Any,prob:float):
         #update states and probs
-        self.states+=[state]
-        self.probs+=[prob]
+        self.states=self.states+[state]
+        self.probs=self.probs+[prob]
         
         #update/check effective length and terminated state
         if not self.terminated :
@@ -30,24 +49,26 @@ class Candidate():
         return np.prod(self.probs[:self.effective_length]) #prod(p(yt|y<t)) until y_t == terminal state
     
     def compute_score(self) -> float:
-        probs = self.probs[:self.effective_length]
-        # states_count = np.bincount(self.states)
-        # H = entropy(states_count/sum(states_count))
-        return sum(np.log(probs))/(self.effective_length**0.75) #+ 0.5*self.effective_length + 10*H
+        probs = self.probs[:self.effective_length]        
+        return sum(np.log(probs))/(self.effective_length**0.75) 
     
     @property
     def score(self):
-        return self.compute_score()
+        return self.compute_score() if not self.score_fn else self.score_fn(self)
     
     def __str__(self):
         return f"states : {self.states}\nscore : {self.score}"
     
     
 class BeamSearch():
-    def __init__(self, transition_fn : Callable, transition_fn_args : Optional[Dict], terminal_state : Optional[int] = None):
+    def __init__(self, transition_fn : Callable, 
+                 transition_fn_args : Optional[Dict], 
+                 score_fn : Optional[Callable] = None,
+                 terminal_state : Optional[int] = None):
         
         self.transition_fn = transition_fn #function to compute probabilities over
         self.transition_fn_args = transition_fn_args #additional arguments for transition function
+        self.score_fn = score_fn #User defined score function
         self.terminal_state = terminal_state #equivalent of End Of Sentence token
     
     #returns the nbest sequences amongst beam_width best candidates for each element in the batch
@@ -59,7 +80,7 @@ class BeamSearch():
         
         #init
         #list of (state,score) where state is the sequence of idx and score the total conditional probability = prod p(y_t|y<t)
-        candidates =[[Candidate([x_init[b].item()], [1], self.terminal_state) for _ in range(beam_width)] for b in range(B)] #(B,beam_width)
+        candidates =[[Candidate([x_init[b].item()], [1], self.terminal_state, self.score_fn) for _ in range(beam_width)] for b in range(B)] #(B,beam_width)
         
         for _ in range(max_len-1): #-1 because starting state is already included
             # print("-*-*-*-new search step-*-*-*-")
@@ -99,7 +120,7 @@ class BeamSearch():
             
             #construct new candidate sequences for every new token possibility
             new_candidates : List[List[Candidate]] = [
-                [Candidate(c.states+[new_state],c.probs+[new_prob.item()],self.terminal_state) for new_state, new_prob in enumerate(beams_probs[idx])] 
+                [Candidate(c.states+[new_state],c.probs+[new_prob.item()],self.terminal_state, self.score_fn) for new_state, new_prob in enumerate(beams_probs[idx])] 
                 for idx,c in enumerate(this_candidates)
                 ] #(beam_width, state_space)
             

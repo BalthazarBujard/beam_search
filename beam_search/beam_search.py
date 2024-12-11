@@ -107,7 +107,7 @@ class BeamSearch():
             # print("----new batch element--------")
             
             #beams_probs (beam_width, state space size)
-            this_candidates = candidates[batch_index]
+            this_candidates = candidates[batch_index] #(beam_width,)
             
             #if first step all candidates share the same state (i.e. start state) -> dont use  all candidates
             if this_candidates[0].effective_length==1:
@@ -118,11 +118,18 @@ class BeamSearch():
             THIS METHOD IS APPARENTLY SLOWER THAN COMPUTING THE BEAM_STATES_LIKELIHOODS BUT ITS EASIER TO MODIFY SCORING FUNCTION
             """
             
-            #construct new candidate sequences for every new token possibility
+            # look only for 2-3*beam width best candidates to continue
+            k = min(beams_probs.size(-1),2*beam_width)
             new_candidates : List[List[Candidate]] = [
-                [Candidate(c.states+[new_state],c.probs+[new_prob.item()],self.terminal_state, self.score_fn) for new_state, new_prob in enumerate(beams_probs[idx])] 
+                [Candidate(c.states+[new_state.item()],c.probs+[new_prob.item()],self.terminal_state, self.score_fn) for new_prob,new_state in zip(*torch.topk(beams_probs[idx],k=k))] 
                 for idx,c in enumerate(this_candidates)
                 ] #(beam_width, state_space)
+            
+            #construct new candidate sequences for every new token possibility
+            # new_candidates : List[List[Candidate]] = [
+            #     [Candidate(c.states+[new_state],c.probs+[new_prob.item()],self.terminal_state, self.score_fn) for new_state, new_prob in enumerate(beams_probs[idx])] 
+            #     for idx,c in enumerate(this_candidates)
+            #     ] #(beam_width, state_space)
             
             
             scores = torch.tensor([[c.score for c in beam_candidates] for beam_candidates in new_candidates])

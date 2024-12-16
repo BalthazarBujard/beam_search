@@ -4,18 +4,15 @@ import numpy as np
 import copy
 from scipy.stats import entropy
 
-
-#TODO : GIVE POSSIBILITY TO USER TO GIVE SCORING FUNCTION AS PARAM
-# the definition of the custom score function by the user has to take as argument a Candidate and use its attributes to compute the score
-# TODO : MAKE ATTRIBUTES PRIVATE IN ORDER TO NOT MODIFY THEM BY MISTAKE WITH CUSTOM SCORE
 class Candidate():
-    def __init__(self,states:List[Any], probs:List[float], terminal_state : Optional[int] = None, score_fn : Optional[Callable] = None):
+    def __init__(self,states:List[Any], probs:List[float], terminal_state : Optional[int] = None, score_fn : Optional[Callable] = None, score_fn_args : Optional[Dict] = None):
         self.__states = states #(T,)
         self.__probs = probs #(T,)
         self.terminal_state = terminal_state
         self.terminated = np.isin(states,terminal_state).any() #True if terminal state is assigned to candidate sequence
         self.effective_length = len(self.states) if not self.terminated else np.where(np.array(states)==terminal_state)[0][0]+1 #length of sequence until terminal state is found
         self.score_fn = score_fn
+        self.score_kwargs = score_fn_args
     
     @property
     def states(self):
@@ -54,21 +51,24 @@ class Candidate():
     
     @property
     def score(self):
-        return self.compute_score() if not self.score_fn else self.score_fn(self)
+        return self.compute_score() if not self.score_fn else self.score_fn(self, **self.score_kwargs)
     
     def __str__(self):
         return f"states : {self.states}\nscore : {self.score}"
     
     
 class BeamSearch():
-    def __init__(self, transition_fn : Callable, 
+    def __init__(self, 
+                 transition_fn : Callable, 
                  transition_fn_args : Optional[Dict], 
                  score_fn : Optional[Callable] = None,
+                 score_fn_args : Optional[Dict] = None,
                  terminal_state : Optional[int] = None):
         
         self.transition_fn = transition_fn #function to compute probabilities over
         self.transition_fn_args = transition_fn_args #additional arguments for transition function
         self.score_fn = score_fn #User defined score function
+        self.score_fn_args = score_fn_args #additional arguments for score function
         self.terminal_state = terminal_state #equivalent of End Of Sentence token
     
     #returns the nbest sequences amongst beam_width best candidates for each element in the batch
@@ -80,7 +80,7 @@ class BeamSearch():
         
         #init
         #list of (state,score) where state is the sequence of idx and score the total conditional probability = prod p(y_t|y<t)
-        candidates =[[Candidate([x_init[b].item()], [1], self.terminal_state, self.score_fn) for _ in range(beam_width)] for b in range(B)] #(B,beam_width)
+        candidates =[[Candidate([x_init[b].item()], [1], self.terminal_state, self.score_fn, self.score_fn_args) for _ in range(beam_width)] for b in range(B)] #(B,beam_width)
         
         for _ in range(max_len-1): #-1 because starting state is already included
             # print("-*-*-*-new search step-*-*-*-")
@@ -95,14 +95,10 @@ class BeamSearch():
         beam_width = len(candidates[0])
         
         probs = self.transition_fn(candidates,**self.transition_fn_args) #(B,beam_width,state space size)
-        
-        
             
         # WE WANT TO MAXIMIZE THE prod(P(Y_t|Y<t)) so before doing find_k_best we need to multiply the prob by the score of the candidate
         #get probabilities (prob of prod(P(y_t-1|y<t-1)))
         
-        # TODO : TERMINATED CANDIDATES CAN BE KEPT IF THEIR SCORE IS GREATER THAN OTHER CANDIDATES OTPIONS 
-        # BUT WE NEED TO COMPARE THE NEW BEAM_STATES_LIKELIHOOD (OF NON-TERMINATED SEQUENCES) WITH THE TERMINATED ONES
         for batch_index, beams_probs in enumerate(probs) :
             # print("----new batch element--------")
             
@@ -121,7 +117,7 @@ class BeamSearch():
             # look only for 2-3*beam width best candidates to continue
             k = min(beams_probs.size(-1),2*beam_width)
             new_candidates : List[List[Candidate]] = [
-                [Candidate(c.states+[new_state.item()],c.probs+[new_prob.item()],self.terminal_state, self.score_fn) for new_prob,new_state in zip(*torch.topk(beams_probs[idx],k=k))] 
+                [Candidate(c.states+[new_state.item()],c.probs+[new_prob.item()],self.terminal_state, self.score_fn, self.score_fn_args) for new_prob,new_state in zip(*torch.topk(beams_probs[idx],k=k))] 
                 for idx,c in enumerate(this_candidates)
                 ] #(beam_width, state_space)
             

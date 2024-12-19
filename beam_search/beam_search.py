@@ -5,7 +5,7 @@ import copy
 from scipy.stats import entropy
 
 class Candidate():
-    def __init__(self,states:List[Any], probs:List[float], terminal_state : Optional[int] = None, score_fn : Optional[Callable] = None, score_fn_args : Optional[Dict] = None):
+    def __init__(self,states:List[Any], probs:List[float], terminal_state : Optional[int] = None, score_fn : Optional[Callable] = None, score_fn_args : Optional[Dict] = {}):
         self.__states = states #(T,)
         self.__probs = probs #(T,)
         self.terminal_state = terminal_state

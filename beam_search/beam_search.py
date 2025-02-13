@@ -4,8 +4,9 @@ import numpy as np
 import copy
 from scipy.stats import entropy
 
+#TODO : MAKE CANDIDATE TENSOR COMPATIBLE
 class Candidate():
-    def __init__(self,states:List[Any], probs:List[float], terminal_state : Optional[int] = None, score_fn : Optional[Callable] = None, score_fn_args : Optional[Dict] = {}):
+    def __init__(self,states:List[Any], probs:List[float], terminal_state : Optional[int] = None, score_fn : Optional[Callable] = None, score_fn_args : Optional[Dict] = {}, beam_probs : torch.Tensor = None):
         self.__states = states #(T,)
         self.__probs = probs #(T,)
         self.terminal_state = terminal_state
@@ -13,6 +14,7 @@ class Candidate():
         self.effective_length = len(self.states) if not self.terminated else np.where(np.array(states)==terminal_state)[0][0]+1 #length of sequence until terminal state is found
         self.score_fn = score_fn
         self.score_kwargs = score_fn_args
+        self.beam_probs = beam_probs #(T, state space size)
     
     @property
     def states(self):
@@ -56,7 +58,7 @@ class Candidate():
     def __str__(self):
         return f"states : {self.states}\nscore : {self.score}"
     
-    
+#TODO : MAKE THIS CLASS FULLY TORCH.TENSOR COMPATIBLE (REMOVE THE .ITEM() ETC)
 class BeamSearch():
     def __init__(self, 
                  transition_fn : Callable, 
@@ -80,6 +82,7 @@ class BeamSearch():
         
         #init
         #list of (state,score) where state is the sequence of idx and score the total conditional probability = prod p(y_t|y<t)
+        
         candidates =[[Candidate([x_init[b].item()], [1], self.terminal_state, self.score_fn, self.score_fn_args) for _ in range(beam_width)] for b in range(B)] #(B,beam_width)
         
         for _ in range(max_len-1): #-1 because starting state is already included
@@ -94,7 +97,8 @@ class BeamSearch():
         
         beam_width = len(candidates[0])
         
-        probs = self.transition_fn(candidates,**self.transition_fn_args) #(B,beam_width,state space size)
+        kwargs = self.transition_fn_args
+        probs : torch.Tensor = self.transition_fn(candidates,**kwargs) if kwargs !=None else self.transition_fn(candidates) #(B,beam_width,state space size)
             
         # WE WANT TO MAXIMIZE THE prod(P(Y_t|Y<t)) so before doing find_k_best we need to multiply the prob by the score of the candidate
         #get probabilities (prob of prod(P(y_t-1|y<t-1)))
@@ -109,6 +113,7 @@ class BeamSearch():
             if this_candidates[0].effective_length==1:
                 beams_probs = beams_probs[0].unsqueeze(0) #(1, state_space)
                 this_candidates=[this_candidates[0]] #(1,)
+                this_candidates[0].beam_probs = beams_probs.numpy(force=True) #(1, state_space)
             
             """ 
             THIS METHOD IS APPARENTLY SLOWER THAN COMPUTING THE BEAM_STATES_LIKELIHOODS BUT ITS EASIER TO MODIFY SCORING FUNCTION
@@ -116,8 +121,16 @@ class BeamSearch():
             
             # look only for 2-3*beam width best candidates to continue
             k = min(beams_probs.size(-1),2*beam_width)
+            
             new_candidates : List[List[Candidate]] = [
-                [Candidate(c.states+[new_state.item()],c.probs+[new_prob.item()],self.terminal_state, self.score_fn, self.score_fn_args) for new_prob,new_state in zip(*torch.topk(beams_probs[idx],k=k))] 
+                [Candidate(
+                    c.states+[new_state.item()],
+                    c.probs+[new_prob.item()],
+                    self.terminal_state, 
+                    self.score_fn, 
+                    self.score_fn_args,
+                    np.concatenate([c.beam_probs,beams_probs[idx].numpy(force=True)[None,...]],axis=0) 
+                    ) for new_prob,new_state in zip(*torch.topk(beams_probs[idx],k=k))] 
                 for idx,c in enumerate(this_candidates)
                 ] #(beam_width, state_space)
             

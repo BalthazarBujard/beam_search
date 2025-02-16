@@ -113,7 +113,10 @@ class BeamSearch():
             if this_candidates[0].effective_length==1:
                 beams_probs = beams_probs[0].unsqueeze(0) #(1, state_space)
                 this_candidates=[this_candidates[0]] #(1,)
-                this_candidates[0].beam_probs = beams_probs.numpy(force=True) #(1, state_space)
+                
+                #initialize beam_probs attribute
+                init_prob = torch.zeros_like(beams_probs).scatter_(dim=1, index = torch.tensor(this_candidates[0].states,device=beams_probs.device).unsqueeze(0),value=1)
+                this_candidates[0].beam_probs = np.concatenate([init_prob.numpy(force=True),beams_probs.numpy(force=True)],axis=0) #(1, state_space)
             
             """ 
             THIS METHOD IS APPARENTLY SLOWER THAN COMPUTING THE BEAM_STATES_LIKELIHOODS BUT ITS EASIER TO MODIFY SCORING FUNCTION
@@ -140,6 +143,11 @@ class BeamSearch():
             #     for idx,c in enumerate(this_candidates)
             #     ] #(beam_width, state_space)
             
+            # print("*"*10)
+            # for beam_candidates in new_candidates:
+            #     for c in beam_candidates:
+            #         print(c)
+            # print("*"*10)
             
             scores = torch.tensor([[c.score for c in beam_candidates] for beam_candidates in new_candidates])
             
